@@ -74,7 +74,7 @@ node backend/server.js
 - Files: `/var/lib/homecloud/files`
 - Administrator account: `/var/lib/homecloud/users.json`
 - Albums: `/var/lib/homecloud/albums.json`
-- Favorites: `/var/lib/homecloud/favorites.json`
+- Favorites: `/var/lib/homecloud/favorites.json`\n- Trash, share links and version snapshots: stored in each account directory under `/var/lib/homecloud/users/`
 
 ## Security
 
