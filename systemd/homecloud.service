@@ -1,0 +1,29 @@
+[Unit]
+Description=HomeCloud dashboard
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=homecloud
+Group=homecloud
+WorkingDirectory=/opt/homecloud
+EnvironmentFile=/etc/homecloud/homecloud.env
+ExecStart=/usr/bin/node /opt/homecloud/backend/src/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/homecloud /var/log/homecloud
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
