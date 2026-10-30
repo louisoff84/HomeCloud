@@ -37,6 +37,11 @@ async function migrateLegacyFiles() {
       else throw error;
     }
   }
+  for (const name of ["albums.json", "favorites.json"]) {
+    const from = path.join(DATA, name), to = path.join(userHome(owner.username), name);
+    try { await lstat(from); try { await lstat(to); } catch (error) { if (error.code === "ENOENT") await rename(from, to); else throw error; } }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
   await mkdir(USER_DATA, { recursive: true, mode: 0o700 });
 }
 await migrateLegacyFiles();
