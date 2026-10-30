@@ -72,13 +72,15 @@ function rateLimitLogin(ip) {
 }
 
 function safeFilePath(relative = "") {
-  if (typeof relative !== "string" || relative.includes("\\0")) throw new Error("Invalid path");
-  const target = path.resolve(FILES_ROOT, relative.replace(/^\\/+/, ""));
+  if (typeof relative !== "string" || relative.includes("\0")) throw new Error("Invalid path");
+  let clean = relative;
+  while (clean.startsWith("/")) clean = clean.slice(1);
+  const target = path.resolve(FILES_ROOT, clean);
   if (target !== FILES_ROOT && !target.startsWith(FILES_ROOT + path.sep)) throw new Error("Invalid path");
   return target;
 }
 function relativeFilePath(value = "") {
-  return String(value).replace(/\\\\/g, "/").split("/").filter(Boolean).join("/");
+  return String(value).split("\\").join("/").split("/").filter(Boolean).join("/");
 }
 app.get("/api/files", { preHandler: requireAuth }, async (request, reply) => {
   let dir;
@@ -97,14 +99,14 @@ app.get("/api/files", { preHandler: requireAuth }, async (request, reply) => {
 });
 app.post("/api/files/folder", { preHandler: requireAuth }, async (request, reply) => {
   const { path: parent = "", name } = request.body || {};
-  if (typeof name !== "string" || !name.trim() || name.length > 120 || /[\\\\/\\0]/.test(name) || name === "." || name === "..") return reply.code(400).send({ error: "Invalid folder name" });
+  if (typeof name !== "string" || !name.trim() || name.length > 120 || name.includes("/") || name.includes("\\") || name.includes("\0") || name === "." || name === "..") return reply.code(400).send({ error: "Invalid folder name" });
   try { await mkdir(safeFilePath(path.join(relativeFilePath(parent), name.trim())), { recursive: false, mode: 0o700 }); return { ok: true }; }
   catch (error) { if (error.code === "EEXIST") return reply.code(409).send({ error: "An item with this name already exists" }); if (error.code === "ENOENT") return reply.code(404).send({ error: "Parent folder not found" }); throw error; }
 });
 app.post("/api/files/upload", { preHandler: requireAuth }, async (request, reply) => {
   const parent = relativeFilePath(request.query.path || "");
   const name = String(request.query.name || "");
-  if (!name || name.length > 180 || /[\\\\/\\0]/.test(name) || name === "." || name === "..") return reply.code(400).send({ error: "Invalid file name" });
+  if (!name || name.length > 180 || name.includes("/") || name.includes("\\") || name.includes("\0") || name === "." || name === "..") return reply.code(400).send({ error: "Invalid file name" });
   const dir = safeFilePath(parent);
   const target = safeFilePath(path.join(parent, name));
   await mkdir(dir, { recursive: true, mode: 0o700 });
