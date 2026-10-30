@@ -170,6 +170,8 @@ const server = http.createServer(async (req,res) => {
         await rm(file,{recursive:info.isDirectory()}); return send(res,200,{ok:true});
       }
       if (route === "/api/metrics") {
+        const account=(await users()).find(x=>x.username===username);
+        if (account?.role!=="admin") return send(res,403,{error:"Administrator access required"});
         const cpus=os.cpus(), total=os.totalmem(), free=os.freemem(); let disk=null,temperature=null;
         try { const info=await statfs("/"); disk={total:info.blocks*info.bsize,used:(info.blocks-info.bavail)*info.bsize,free:info.bavail*info.bsize}; } catch {}
         try { temperature=+(await readFile("/sys/class/thermal/thermal_zone0/temp","utf8"))/1000; } catch {}
