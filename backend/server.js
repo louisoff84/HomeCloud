@@ -76,7 +76,7 @@ const server = http.createServer(async (req,res) => {
     if (route === "/api/auth/setup" && req.method === "POST") {
       const existing=await users(), data=await body(req);
       if (existing.length) return send(res,409,{error:"Administrator already configured"});
-      if (!/^[\\w-]{3,32}$/.test(data.username||"") || typeof data.password!=="string" || data.password.length<12 || data.password.length>128) return send(res,400,{error:"Username must be 3-32 characters and password at least 12"});
+      if (!/^[a-zA-Z0-9_-]{3,32}$/.test(data.username||"") || typeof data.password!=="string" || data.password.length<12 || data.password.length>128) return send(res,400,{error:"Username must be 3-32 characters and password at least 12"});
       const salt=randomBytes(16).toString("hex"), hash=(await scrypt(data.password,salt,64)).toString("hex");
       await saveJson(USERS,[{username:data.username,salt,hash,role:"admin",createdAt:new Date().toISOString()}]);
       await mkdir(userFiles(data.username),{recursive:true,mode:0o700});
