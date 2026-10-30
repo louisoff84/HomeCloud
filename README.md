@@ -26,10 +26,9 @@ HomeCloud is a self-hosted personal cloud that combines a Google Drive-style fil
 - CPU, memory, disk and temperature overview
 
 ### Interface
-- Responsive desktop and mobile layout
-- Apple Liquid Glass-inspired navigation and floating controls
-- Translucent blur surfaces, subtle highlights and motion
-- Reduced-motion and reduced-transparency preferences respected
+- Google Drive-inspired light interface for file management
+- Immich-inspired dark photo timeline and media library
+- Responsive desktop and mobile layout with separate Drive and Photos themes
 
 ## Stack
 - Node.js native HTTP server (no backend framework)
