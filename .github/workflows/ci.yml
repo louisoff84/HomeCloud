@@ -5,16 +5,13 @@ on:
   pull_request:
     branches: [main]
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
-      - run: npm install
-      - run: npm run build
-      - run: node --check backend/src/server.js
+          node-version: 22
+      - run: node --check backend/server.js
+      - run: node --check public/app.js
+      - run: node -e "const p=require('./package.json'); if (Object.keys(p.dependencies||{}).length) process.exit(1)"
