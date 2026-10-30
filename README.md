@@ -19,6 +19,19 @@ Lightweight self-hosted home server dashboard for low-memory ARM64 devices such 
 - 150 MB free disk space for installation/build
 
 ## Install
+
+On Debian 12, the distribution Node.js package may be older than the required version. Install Node.js 22 first:
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+node --version
+```
+
+Then install HomeCloud:
+
 ```bash
 git clone https://github.com/louisoff84/HomeCloud.git
 cd HomeCloud
