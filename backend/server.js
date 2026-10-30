@@ -112,6 +112,10 @@ const server = http.createServer(async (req,res) => {
         for (const entry of entries) { const info=await lstat(path.join(dir,entry.name)); if (!info.isSymbolicLink()) files.push({name:entry.name,type:info.isDirectory()?"folder":"file",size:info.size,modified:info.mtime.toISOString()}); }
         files.sort((a,b)=>a.type===b.type?a.name.localeCompare(b.name):a.type==="folder"?-1:1); return send(res,200,{files});
       }
+      if (route === "/api/files/all" && req.method === "GET") {
+        const all=await walk(userFiles(username));
+        return send(res,200,{files:all.map(file=>({...file,type:"file"}))});
+      }
       if (route === "/api/photos" && req.method === "GET") {
         const all=await walk(userFiles(username)), photos=all.filter(f=>imageExt.has(f.ext)||videoExt.has(f.ext)).sort((a,b)=>b.modified.localeCompare(a.modified));
         return send(res,200,{photos});
