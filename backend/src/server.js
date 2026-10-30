@@ -3,19 +3,23 @@ import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import { randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import { readFile, writeFile, mkdir, statfs } from "node:fs/promises";
+import { readFile, writeFile, mkdir, statfs, readdir, lstat, rm, createReadStream } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import { execFile } from "node:child_process";
 import { promisify as pify } from "node:util";
 
 const scrypt = promisify(scryptCb);
 const execFileAsync = pify(execFile);
-const app = Fastify({ logger: { level: process.env.NODE_ENV === "production" ? "warn" : "info" }, bodyLimit: 16 * 1024 });
+const app = Fastify({ logger: { level: process.env.NODE_ENV === "production" ? "warn" : "info" }, bodyLimit: 100 * 1024 * 1024 });
 const PORT = Number(process.env.HOMECloud_PORT || 6944);
 const HOST = process.env.HOMECloud_HOST || "127.0.0.1";
 const DATA = process.env.HOMECloud_DATA_DIR || path.resolve("data");
 const USERS_FILE = path.join(DATA, "users.json");
+const FILES_ROOT = path.join(DATA, "files");
+await mkdir(FILES_ROOT, { recursive: true, mode: 0o700 });
+app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: 100 * 1024 * 1024 }, (request, body, done) => done(null, body));
 const COOKIE = "homecloud_session";
 const sessions = new Map();
 const allowedServices = (process.env.HOMECloud_SERVICES || "ssh.service,cron.service").split(",").map(x => x.trim()).filter(x => /^[a-zA-Z0-9_.@-]+\.service$/.test(x));
@@ -65,6 +69,75 @@ function rateLimitLogin(ip) {
   loginAttempts.set(ip, item);
   return item.count <= 8;
 }
+
+function safeFilePath(relative = "") {
+  if (typeof relative !== "string" || relative.includes("\\0")) throw new Error("Invalid path");
+  const target = path.resolve(FILES_ROOT, relative.replace(/^\\/+/, ""));
+  if (target !== FILES_ROOT && !target.startsWith(FILES_ROOT + path.sep)) throw new Error("Invalid path");
+  return target;
+}
+function relativeFilePath(value = "") {
+  return String(value).replace(/\\\\/g, "/").split("/").filter(Boolean).join("/");
+}
+app.get("/api/files", { preHandler: requireAuth }, async (request, reply) => {
+  let dir;
+  try { dir = safeFilePath(relativeFilePath(request.query.path || "")); }
+  catch { return reply.code(400).send({ error: "Invalid path" }); }
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const files = await Promise.all(entries.map(async entry => {
+      const full = path.join(dir, entry.name);
+      const info = await lstat(full);
+      if (info.isSymbolicLink()) return null;
+      return { name: entry.name, type: entry.isDirectory() ? "folder" : "file", size: info.isFile() ? info.size : 0, modified: info.mtime.toISOString() };
+    }));
+    return { path: relativeFilePath(request.query.path || ""), files: files.filter(Boolean).sort((a,b) => a.type === b.type ? a.name.localeCompare(b.name) : a.type === "folder" ? -1 : 1) };
+  } catch (error) { if (error.code === "ENOENT") return reply.code(404).send({ error: "Folder not found" }); throw error; }
+});
+app.post("/api/files/folder", { preHandler: requireAuth }, async (request, reply) => {
+  const { path: parent = "", name } = request.body || {};
+  if (typeof name !== "string" || !name.trim() || name.length > 120 || /[\\\\/\\0]/.test(name) || name === "." || name === "..") return reply.code(400).send({ error: "Invalid folder name" });
+  try { await mkdir(safeFilePath(path.join(relativeFilePath(parent), name.trim())), { recursive: false, mode: 0o700 }); return { ok: true }; }
+  catch (error) { if (error.code === "EEXIST") return reply.code(409).send({ error: "An item with this name already exists" }); if (error.code === "ENOENT") return reply.code(404).send({ error: "Parent folder not found" }); throw error; }
+});
+app.post("/api/files/upload", { preHandler: requireAuth }, async (request, reply) => {
+  const parent = relativeFilePath(request.query.path || "");
+  const name = String(request.query.name || "");
+  if (!name || name.length > 180 || /[\\\\/\\0]/.test(name) || name === "." || name === "..") return reply.code(400).send({ error: "Invalid file name" });
+  const dir = safeFilePath(parent);
+  const target = safeFilePath(path.join(parent, name));
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  try {
+    const handle = await import("node:fs/promises");
+    await handle.writeFile(target, request.body, { flag: "wx", mode: 0o600 });
+    return { ok: true, name, size: request.body.length };
+  } catch (error) { if (error.code === "EEXIST") return reply.code(409).send({ error: "A file with this name already exists" }); throw error; }
+});
+app.get("/api/files/download", { preHandler: requireAuth }, async (request, reply) => {
+  let target;
+  try { target = safeFilePath(relativeFilePath(request.query.path || "")); }
+  catch { return reply.code(400).send({ error: "Invalid path" }); }
+  try {
+    const info = await lstat(target);
+    if (!info.isFile() || info.isSymbolicLink()) return reply.code(404).send({ error: "File not found" });
+    reply.header("Content-Type", "application/octet-stream");
+    reply.header("Content-Length", info.size);
+    reply.header("Content-Disposition", "attachment; filename*=UTF-8''" + encodeURIComponent(path.basename(target)));
+    return reply.send(createReadStream(target));
+  } catch (error) { if (error.code === "ENOENT") return reply.code(404).send({ error: "File not found" }); throw error; }
+});
+app.delete("/api/files", { preHandler: requireAuth }, async (request, reply) => {
+  let target;
+  try { target = safeFilePath(relativeFilePath(request.query.path || "")); }
+  catch { return reply.code(400).send({ error: "Invalid path" }); }
+  if (target === FILES_ROOT) return reply.code(403).send({ error: "Cannot delete storage root" });
+  try {
+    const info = await lstat(target);
+    if (info.isSymbolicLink()) return reply.code(403).send({ error: "Symbolic links are not allowed" });
+    await rm(target, { recursive: info.isDirectory(), force: false });
+    return { ok: true };
+  } catch (error) { if (error.code === "ENOENT") return reply.code(404).send({ error: "Item not found" }); throw error; }
+});
 
 app.get("/api/health", async () => ({ status: "ok", name: "HomeCloud", version: "0.1.0" }));
 app.get("/api/auth/status", async () => ({ setupRequired: (await users()).length === 0 }));
