@@ -82,8 +82,7 @@ test("HomeCloud account isolation, uploads, versions, sharing and trash", async 
     assert.equal(newLogin.status,200);
     assert.ok(secondCookie);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise(resolve=>child.once("exit",resolve).setTimeout?.(2000));
+    if(child.exitCode===null){const exited=new Promise(resolve=>child.once("exit",resolve));child.kill("SIGTERM");await exited;}
     await rm(dataDir,{recursive:true,force:true});
   }
 });
