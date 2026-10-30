@@ -1,7 +1,7 @@
 import http from "node:http";
 import { randomBytes, scrypt as sc, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import { readFile, writeFile, mkdir, rename, readdir, lstat, rm, statfs } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, readdir, lstat, rm, statfs, copyFile } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import os from "node:os";
@@ -24,6 +24,11 @@ const userHome = username => path.join(USER_DATA, username);
 const userFiles = username => path.join(userHome(username), "files");
 const userAlbums = username => path.join(userHome(username), "albums.json");
 const userFavorites = username => path.join(userHome(username), "favorites.json");
+const userTrash = username => path.join(userHome(username), "trash");
+const userVersions = username => path.join(userHome(username), "versions");
+const userVersionIndex = username => path.join(userHome(username), "versions.json");
+const userShares = username => path.join(userHome(username), "shares.json");
+const userQuota = username => +(process.env.HOMECloud_USER_QUOTA_BYTES || 0);
 async function migrateLegacyFiles() {
   const accounts = await users();
   if (!accounts.length) return;
@@ -60,7 +65,7 @@ function auth(req) { const token=cookies(req).homecloud_session; const session=t
 function safe(value = "", root = LEGACY_FILES) { if (typeof value !== "string" || value.includes("\0")) throw Error("Invalid path"); const parts=value.replaceAll("\\","/").split("/").filter(Boolean); if (parts.some(x => x === "." || x === "..")) throw Error("Invalid path"); const base=path.resolve(root), target=path.resolve(base,...parts); if (target !== base && !target.startsWith(base + path.sep)) throw Error("Invalid path"); return target; }
 function relative(value = "") { return String(value).replaceAll("\\","/").split("/").filter(Boolean).join("/"); }
 function sessionCookie(token, secure) { return "homecloud_session=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200" + (secure ? "; Secure" : ""); }
-async function walk(dir, prefix = "") { const out=[]; for (const item of await readdir(dir,{withFileTypes:true})) { const rel=prefix ? prefix+"/"+item.name : item.name; const full=path.join(dir,item.name); const info=await lstat(full); if (info.isSymbolicLink()) continue; if (info.isDirectory()) out.push(...await walk(full,rel)); else if (info.isFile()) out.push({ name:item.name, path:rel, size:info.size, modified:info.mtime.toISOString(), ext:path.extname(item.name).toLowerCase() }); } return out; }
+async function walk(dir, prefix = "") { const out=[]; for (const item of await readdir(dir,{withFileTypes:true})) { const rel=prefix ? prefix+"/"+item.name : item.name; const full=path.join(dir,item.name); const info=await lstat(full); if (info.isSymbolicLink()) continue; if (item.name.startsWith(".")) continue; if (info.isDirectory()) out.push(...await walk(full,rel)); else if (info.isFile()) out.push({ name:item.name, path:rel, size:info.size, modified:info.mtime.toISOString(), ext:path.extname(item.name).toLowerCase() }); } return out; }
 async function staticFile(req,res,url) { let pathname; try { pathname=decodeURIComponent(url.pathname); } catch { return send(res,400,{error:"Invalid URL"}); } if (pathname === "/") pathname="/index.html"; const file=path.resolve(PUB,"."+pathname); if (!file.startsWith(PUB+path.sep)) return send(res,403,{error:"Forbidden"}); try { const info=await lstat(file); if (!info.isFile() || info.isSymbolicLink()) throw Error(); const ext=path.extname(file); const types={".html":"text/html; charset=utf-8",".css":"text/css; charset=utf-8",".js":"text/javascript; charset=utf-8",".svg":"image/svg+xml",".ico":"image/x-icon"}; res.writeHead(200,{"Content-Type":types[ext]||"application/octet-stream","Content-Length":info.size,"X-Content-Type-Options":"nosniff"}); createReadStream(file).pipe(res); } catch { send(res,404,{error:"Not found"}); } }
 
 const server = http.createServer(async (req,res) => {
@@ -86,8 +91,88 @@ const server = http.createServer(async (req,res) => {
       const token=randomBytes(32).toString("hex"); sessions.set(token,{name:account.username,exp:Date.now()+43200000});
       return send(res,200,{ok:true,username:account.username,role:account.role||"user"},{"Set-Cookie":sessionCookie(token,process.env.HOMECloud_SECURE_COOKIE==="1")});
     }
+    if (route.startsWith("/api/public/share/") && req.method === "GET") {
+      const token=route.split("/").pop();
+      if (!/^[a-f0-9]{48,80}$/.test(token)) return send(res,404,{error:"Share not found"});
+      for (const account of await users()) {
+        const shares=await readJson(userShares(account.username),[]);
+        const share=shares.find(item=>item.token===token && (!item.expiresAt || new Date(item.expiresAt).getTime()>Date.now()));
+        if (!share) continue;
+        const file=safe(share.path,userFiles(account.username)), info=await lstat(file);
+        if (!info.isFile() || info.isSymbolicLink()) return send(res,404,{error:"Shared file not found"});
+        res.writeHead(200,{"Content-Type":mime[path.extname(file).toLowerCase()]||"application/octet-stream","Content-Length":info.size,"Content-Disposition":"inline; filename*=UTF-8''"+encodeURIComponent(path.basename(file)),"X-Content-Type-Options":"nosniff","Cache-Control":"private, no-store"});
+        return createReadStream(file).pipe(res);
+      }
+      return send(res,404,{error:"Share not found or expired"});
+    }
     if (route.startsWith("/api/")) {
       const username=auth(req); if (!username) return send(res,401,{error:"Authentication required"});
+      if (route === "/api/account" && req.method === "GET") {
+        const account=(await users()).find(x=>x.username===username);
+        const files=await walk(userFiles(username)), used=files.reduce((sum,file)=>sum+file.size,0), quota=userQuota(username);
+        return send(res,200,{username,role:account?.role||"user",used,quota,files:files.length});
+      }
+      if (route === "/api/account/password" && req.method === "POST") {
+        const data=await body(req), accounts=await users(), account=accounts.find(x=>x.username===username);
+        if (typeof data.currentPassword!=="string" || typeof data.newPassword!=="string" || data.newPassword.length<12 || data.newPassword.length>128) return send(res,400,{error:"New password must contain 12-128 characters"});
+        const actual=Buffer.from((await scrypt(data.currentPassword,account.salt,64)).toString("hex")), expected=Buffer.from(account.hash);
+        if (actual.length!==expected.length || !timingSafeEqual(actual,expected)) return send(res,403,{error:"Current password is incorrect"});
+        account.salt=randomBytes(16).toString("hex"); account.hash=(await scrypt(data.newPassword,account.salt,64)).toString("hex");
+        await saveJson(USERS,accounts); return send(res,200,{ok:true});
+      }
+      if (route === "/api/search" && req.method === "GET") {
+        const query=String(url.searchParams.get("q")||"").trim().toLowerCase();
+        if (query.length<2) return send(res,200,{files:[]});
+        const all=await walk(userFiles(username));
+        return send(res,200,{files:all.filter(file=>file.path.toLowerCase().includes(query)).slice(0,200)});
+      }
+      if (route === "/api/trash" && req.method === "GET") return send(res,200,{items:await readJson(path.join(userTrash(username),"index.json"),[])});
+      if (route === "/api/trash" && req.method === "DELETE") {
+        const items=await readJson(path.join(userTrash(username),"index.json"),[]);
+        await Promise.all(items.map(item=>rm(path.join(userTrash(username),item.id),{recursive:true,force:true})));
+        await saveJson(path.join(userTrash(username),"index.json"),[]); return send(res,200,{ok:true});
+      }
+      if (route.startsWith("/api/trash/") && req.method === "POST") {
+        const id=route.split("/").pop(), index=path.join(userTrash(username),"index.json"), items=await readJson(index,[]);
+        const item=items.find(entry=>entry.id===id); if(!item)return send(res,404,{error:"Trash item not found"});
+        const source=path.join(userTrash(username),id), destination=safe(item.path,userFiles(username));
+        await mkdir(path.dirname(destination),{recursive:true});
+        try { await lstat(destination); return send(res,409,{error:"A file with that name already exists. Rename or move it first."}); } catch(error){if(error.code!=="ENOENT")throw error;}
+        await rename(source,destination); await saveJson(index,items.filter(entry=>entry.id!==id)); return send(res,200,{ok:true});
+      }
+      if (route === "/api/shares" && req.method === "GET") return send(res,200,{shares:await readJson(userShares(username),[])});
+      if (route === "/api/shares" && req.method === "POST") {
+        const data=await body(req), rel=relative(data.path||"");
+        if (!rel || rel.length>1024) return send(res,400,{error:"Choose a file to share"});
+        const file=safe(rel,userFiles(username)), info=await lstat(file);
+        if (!info.isFile() || info.isSymbolicLink()) return send(res,400,{error:"Only individual files can be shared"});
+        const expires=Number(data.expiresInDays||0);
+        if (![0,1,7,30].includes(expires)) return send(res,400,{error:"Invalid expiration"});
+        const shares=await readJson(userShares(username),[]), share={id:randomBytes(8).toString("hex"),token:randomBytes(32).toString("hex"),path:rel,createdAt:new Date().toISOString(),expiresAt:expires?new Date(Date.now()+expires*86400000).toISOString():null};
+        shares.unshift(share); await saveJson(userShares(username),shares);
+        return send(res,201,{share:{...share,url:"/api/public/share/"+share.token}});
+      }
+      if (route.startsWith("/api/shares/") && req.method === "DELETE") {
+        const id=route.split("/").pop(), shares=await readJson(userShares(username),[]), next=shares.filter(share=>share.id!==id);
+        if(next.length===shares.length)return send(res,404,{error:"Share not found"});
+        await saveJson(userShares(username),next); return send(res,200,{ok:true});
+      }
+      if (route === "/api/versions" && req.method === "GET") {
+        const rel=relative(url.searchParams.get("path")||"");
+        return send(res,200,{versions:(await readJson(userVersionIndex(username),[])).filter(item=>item.path===rel)});
+      }
+      if (route.startsWith("/api/versions/") && req.method === "GET") {
+        const id=route.split("/").pop(), versions=await readJson(userVersionIndex(username),[]), version=versions.find(item=>item.id===id);
+        if(!version)return send(res,404,{error:"Version not found"});
+        const file=path.join(userVersions(username),id), info=await lstat(file);
+        res.writeHead(200,{"Content-Type":"application/octet-stream","Content-Length":info.size,"Content-Disposition":"attachment; filename*=UTF-8''"+encodeURIComponent(path.basename(version.path))});return createReadStream(file).pipe(res);
+      }
+      if (route.startsWith("/api/versions/") && req.method === "POST") {
+        const id=route.split("/").pop(), versions=await readJson(userVersionIndex(username),[]), version=versions.find(item=>item.id===id);
+        if(!version)return send(res,404,{error:"Version not found"});
+        const source=path.join(userVersions(username),id), destination=safe(version.path,userFiles(username));
+        await copyFile(source,destination);return send(res,200,{ok:true});
+      }
       if (route === "/api/auth/me") { const account=(await users()).find(x=>x.username===username); return send(res,200,{username,role:account?.role||"user"}); }
       if (route === "/api/admin/users" && req.method === "GET") {
         const account=(await users()).find(x=>x.username===username);
@@ -157,9 +242,14 @@ const server = http.createServer(async (req,res) => {
         if (!name || name.length>180 || /[\\/\0]/.test(name) || name==="." || name==="..") return send(res,400,{error:"Invalid file name"});
         const directory=safe(parent,userFiles(username)); await mkdir(directory,{recursive:true});
         const destination=safe(path.join(parent,name),userFiles(username)), temp=destination+"."+randomBytes(5).toString("hex")+".tmp"; let size=0;
+        const quota=userQuota(username), existing=await walk(userFiles(username)), used=existing.reduce((sum,file)=>sum+file.size,0);
+        let previous=0; try { const info=await lstat(destination); if(info.isFile())previous=info.size; } catch(error){if(error.code!=="ENOENT")throw error;}
+        if(quota && used-previous>=quota)return send(res,413,{error:"Storage quota reached"});
         const {Transform}=await import("node:stream");
-        const counter=new Transform({transform(chunk,encoding,callback){size+=chunk.length;callback(size>100*1024*1024?Object.assign(Error("Maximum upload size is 100 MB"),{status:413}):null,chunk);}});
-        try { await pipeline(req,counter,createWriteStream(temp,{flags:"wx",mode:0o600})); await rename(temp,destination); }
+        const counter=new Transform({transform(chunk,encoding,callback){size+=chunk.length;callback(size>100*1024*1024?Object.assign(Error("Maximum upload size is 100 MB"),{status:413}):(quota && used-previous+size>quota?Object.assign(Error("Storage quota exceeded"),{status:413}):null),chunk);}});
+        try { await pipeline(req,counter,createWriteStream(temp,{flags:"wx",mode:0o600}));
+          try { const info=await lstat(destination); if(info.isFile()){const versions=await readJson(userVersionIndex(username),[]), id=randomBytes(12).toString("hex"); await mkdir(userVersions(username),{recursive:true}); await copyFile(destination,path.join(userVersions(username),id)); versions.unshift({id,path:relative(path.relative(userFiles(username),destination)),size:info.size,createdAt:new Date().toISOString()}); for(const old of versions.splice(10))await rm(path.join(userVersions(username),old.id),{force:true}); await saveJson(userVersionIndex(username),versions); } } catch(error){if(error.code!=="ENOENT")throw error;}
+          await rename(temp,destination); }
         catch(error) { await rm(temp,{force:true}); throw error; }
         return send(res,200,{ok:true,size});
       }
@@ -169,9 +259,13 @@ const server = http.createServer(async (req,res) => {
         res.writeHead(200,{"Content-Type":"application/octet-stream","Content-Length":info.size,"Content-Disposition":"attachment; filename*=UTF-8''"+encodeURIComponent(path.basename(file))}); return createReadStream(file).pipe(res);
       }
       if (route === "/api/files" && req.method === "DELETE") {
-        const file=safe(relative(url.searchParams.get("path")||""),userFiles(username)); if (file===userFiles(username)) return send(res,403,{error:"Cannot delete root"});
+        const rel=relative(url.searchParams.get("path")||""), file=safe(rel,userFiles(username)); if (file===userFiles(username)) return send(res,403,{error:"Cannot delete root"});
         const info=await lstat(file); if (info.isSymbolicLink()) return send(res,403,{error:"Symlinks forbidden"});
-        await rm(file,{recursive:info.isDirectory()}); return send(res,200,{ok:true});
+        const trash=userTrash(username), id=randomBytes(12).toString("hex"); await mkdir(trash,{recursive:true});
+        await rename(file,path.join(trash,id));
+        const index=path.join(trash,"index.json"), items=await readJson(index,[]);
+        items.unshift({id,path:rel,name:path.basename(rel),type:info.isDirectory()?"folder":"file",size:info.isFile()?info.size:null,deletedAt:new Date().toISOString()});
+        await saveJson(index,items); return send(res,200,{ok:true,trashed:true});
       }
       if (route === "/api/metrics") {
         const account=(await users()).find(x=>x.username===username);
