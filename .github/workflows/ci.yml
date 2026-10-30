@@ -14,4 +14,5 @@ jobs:
           node-version: 22
       - run: node --check backend/server.js
       - run: node --check public/app.js
+      - run: npm test
       - run: node -e "const p=require('./package.json'); if (Object.keys(p.dependencies||{}).length) process.exit(1)"
