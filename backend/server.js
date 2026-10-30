@@ -140,17 +140,38 @@ const server = http.createServer(async (req,res) => {
         try { await lstat(destination); return send(res,409,{error:"A file with that name already exists. Rename or move it first."}); } catch(error){if(error.code!=="ENOENT")throw error;}
         await rename(source,destination); await saveJson(index,items.filter(entry=>entry.id!==id)); return send(res,200,{ok:true});
       }
+      if (route === "/api/shared" && req.method === "GET") {
+        const accounts=await users(), incoming=[];
+        for(const owner of accounts){if(owner.username===username)continue;const shares=await readJson(userShares(owner.username),[]);for(const share of shares)if(share.recipient===username&&(!share.expiresAt||new Date(share.expiresAt).getTime()>Date.now()))incoming.push({id:share.id,owner:owner.username,path:share.path,permission:share.permission||"read",createdAt:share.createdAt});}
+        return send(res,200,{shares:incoming});
+      }
+      if (route.startsWith("/api/shared/") && ["GET","PUT"].includes(req.method)) {
+        const id=route.split("/").pop(), accounts=await users();let found=null;
+        for(const owner of accounts){if(owner.username===username)continue;const shares=await readJson(userShares(owner.username),[]),share=shares.find(item=>item.id===id&&item.recipient===username&&(!item.expiresAt||new Date(item.expiresAt).getTime()>Date.now()));if(share){found={owner:owner.username,share};break;}}
+        if(!found)return send(res,404,{error:"Shared file not found"});
+        if(req.method==="PUT"&&found.share.permission!=="write")return send(res,403,{error:"This shared file is read-only"});
+        const file=safe(found.share.path,userFiles(found.owner)),info=await lstat(file);
+        if(!info.isFile()||info.isSymbolicLink())return send(res,404,{error:"Shared file not found"});
+        if(req.method==="GET"){res.writeHead(200,{"Content-Type":mime[path.extname(file).toLowerCase()]||"application/octet-stream","Content-Length":info.size,"Content-Disposition":"attachment; filename*=UTF-8''"+encodeURIComponent(path.basename(file))});return createReadStream(file).pipe(res);}
+        const temp=file+"."+randomBytes(5).toString("hex")+".tmp";let size=0;
+        const {Transform}=await import("node:stream");
+        const counter=new Transform({transform(chunk,encoding,callback){size+=chunk.length;callback(size>100*1024*1024?Object.assign(Error("Maximum upload size is 100 MB"),{status:413}):null,chunk);}});
+        try{await pipeline(req,counter,createWriteStream(temp,{flags:"wx",mode:0o600}));const versions=await readJson(userVersionIndex(found.owner),[]),versionId=randomBytes(12).toString("hex");await mkdir(userVersions(found.owner),{recursive:true});await copyFile(file,path.join(userVersions(found.owner),versionId));versions.unshift({id:versionId,path:found.share.path,size:info.size,createdAt:new Date().toISOString()});for(const old of versions.splice(10))await rm(path.join(userVersions(found.owner),old.id),{force:true});await saveJson(userVersionIndex(found.owner),versions);await rename(temp,file);}catch(error){await rm(temp,{force:true});throw error;}
+        return send(res,200,{ok:true,size});
+      }
       if (route === "/api/shares" && req.method === "GET") return send(res,200,{shares:await readJson(userShares(username),[])});
       if (route === "/api/shares" && req.method === "POST") {
         const data=await body(req), rel=relative(data.path||"");
         if (!rel || rel.length>1024) return send(res,400,{error:"Choose a file to share"});
         const file=safe(rel,userFiles(username)), info=await lstat(file);
         if (!info.isFile() || info.isSymbolicLink()) return send(res,400,{error:"Only individual files can be shared"});
-        const expires=Number(data.expiresInDays||0);
+        const expires=Number(data.expiresInDays||0), recipient=String(data.username||"").trim().toLowerCase(), permission=data.permission||"read";
         if (![0,1,7,30].includes(expires)) return send(res,400,{error:"Invalid expiration"});
-        const shares=await readJson(userShares(username),[]), share={id:randomBytes(8).toString("hex"),token:randomBytes(32).toString("hex"),path:rel,createdAt:new Date().toISOString(),expiresAt:expires?new Date(Date.now()+expires*86400000).toISOString():null};
+        if(recipient&&(!/^[a-z0-9_-]{3,32}$/.test(recipient)||recipient===username||!(await users()).some(account=>account.username===recipient)))return send(res,400,{error:"Choose an existing different account"});
+        if(!["read","write"].includes(permission))return send(res,400,{error:"Invalid permission"});
+        const shares=await readJson(userShares(username),[]), share={id:randomBytes(8).toString("hex"),token:recipient?null:randomBytes(32).toString("hex"),recipient:recipient||null,permission,path:rel,createdAt:new Date().toISOString(),expiresAt:expires?new Date(Date.now()+expires*86400000).toISOString():null};
         shares.unshift(share); await saveJson(userShares(username),shares);
-        return send(res,201,{share:{...share,url:"/api/public/share/"+share.token}});
+        return send(res,201,{share:{...share,url:share.token?"/api/public/share/"+share.token:null}});
       }
       if (route.startsWith("/api/shares/") && req.method === "DELETE") {
         const id=route.split("/").pop(), shares=await readJson(userShares(username),[]), next=shares.filter(share=>share.id!==id);
