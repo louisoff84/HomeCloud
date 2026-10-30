@@ -17,11 +17,19 @@ HomeCloud is a self-hosted personal cloud that combines a Google Drive-style fil
 - Favorites
 - Select photos and videos to create albums
 
-### Account and server
+### Accounts and server
 - First-run administrator setup and login
+- Administrators can create up to 99 additional user accounts
+- Each account has isolated files, photos, albums and favorites
 - Scrypt password hashing and HTTP-only session cookies
 - Optional Secure cookies for HTTPS deployments
 - CPU, memory, disk and temperature overview
+
+### Interface
+- Responsive desktop and mobile layout
+- Apple Liquid Glass-inspired navigation and floating controls
+- Translucent blur surfaces, subtle highlights and motion
+- Reduced-motion and reduced-transparency preferences respected
 
 ## Stack
 - Node.js native HTTP server (no backend framework)
@@ -71,6 +79,12 @@ node backend/server.js
 ## Security
 
 Keep HomeCloud behind WireGuard or a trusted HTTPS reverse proxy. Do not expose port 6944 directly to the public Internet. For HTTPS deployments, set `HOMECloud_SECURE_COOKIE=1` in `/etc/homecloud/homecloud.env` and restart the service.
+
+## Account management
+
+Sign in with the administrator account, open **Accounts** in the sidebar, and create a username plus a temporary password (minimum 12 characters). Share those credentials securely with the new user. Each account starts with its own empty storage area; users cannot browse other accounts' files.
+
+Existing single-user files, albums and favorites are migrated into the first administrator account on service startup after updating.
 
 ## Current limitations
 
